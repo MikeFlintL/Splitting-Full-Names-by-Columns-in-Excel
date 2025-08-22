@@ -1,0 +1,151 @@
+import pandas as pd
+import re
+from pathlib import Path
+
+PATH_TO_FEMALE_NAMES_FILE = r'C:\....\female_names_rus.txt'
+PATH_TO_MALE_NAMES_FILE = r'C:\....\male_names_rus.txt'
+PATH_TO_SURNAMES_FILE = r'C:\....\male_surnames_rus.txt'
+
+# Окончания для определения отчеств
+PATRONYMIC_ENDINGS_MALE = ('ович', 'евич', 'ич')
+PATRONYMIC_ENDINGS_FEMALE = ('овна', 'евна', 'ична', 'инична')
+ALL_PATRONYMIC_ENDINGS = PATRONYMIC_ENDINGS_MALE + PATRONYMIC_ENDINGS_FEMALE
+
+
+--- ФУНКЦИИ ---
+
+def load_names_from_file(file_path: str) -> set:
+    """Загружает список из локального файла и возвращает его в виде множества."""
+    print(f"Загрузка данных из файла: {file_path}")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # Приводим все к единому виду (с большой буквы) для корректного сравнения
+            items = {line.strip().capitalize() for line in f if line.strip()}
+        print(f"Загружено {len(items)} уникальных записей.")
+        return items
+    except FileNotFoundError:
+        print(f"Ошибка: Файл не найден по пути '{file_path}'.")
+        print("Пожалуйста, проверьте правильность пути в настройках скрипта.")
+        return None
+    except Exception as e:
+        print(f"Произошла ошибка при чтении файла '{file_path}': {e}")
+        return None
+
+
+def parse_full_name(full_name_str: str, first_names_set: set, surnames_set: set) -> tuple:
+    """
+    Разбирает строку с ФИО на компоненты.
+    Отчества определяет по характерным окончаниям.
+    """
+    if not isinstance(full_name_str, str) or not full_name_str.strip():
+        return (None, None, None)
+
+    cleaned_name = re.sub(r'[^\w\s-]', '', full_name_str).strip()
+    words = [word.capitalize() for word in cleaned_name.split()]
+
+    if not words:
+        return (None, None, None)
+
+    first_name, last_name, patronymic = None, None, None
+    remaining_words = list(words)
+    is_confirmed_name = False  # Флаг, подтверждающий, что это действительно ФИО
+
+    # --- Шаг 1: Ищем отчество по окончанию ---
+    for i, word in enumerate(remaining_words):
+        if word.lower().endswith(ALL_PATRONYMIC_ENDINGS):
+            patronymic = word
+            remaining_words.pop(i)
+            is_confirmed_name = True
+            break
+
+    # --- Шаг 2: Ищем имя в общем списке известных имен ---
+    for i, word in enumerate(remaining_words):
+        if word in first_names_set:
+            first_name = word
+            remaining_words.pop(i)
+            is_confirmed_name = True
+            break
+
+    # --- Шаг 3: Все, что осталось - это фамилия ---
+    if remaining_words:
+        last_name = "-".join(remaining_words)
+        # Дополнительная проверка: если оставшееся слово есть в списке фамилий
+        if not is_confirmed_name:
+            for part in remaining_words:
+                if part in surnames_set:
+                    is_confirmed_name = True
+                    break
+
+    # --- Шаг 4: Финальная проверка ---
+    # Если мы не нашли ни одного подтвержденного компонента, считаем, что это не ФИО.
+    if not is_confirmed_name:
+        return (None, None, None)
+
+    return (last_name, first_name, patronymic)
+
+
+# --- ОСНОВНОЙ СКРИПТ ---
+
+def main():
+    """Главная функция для выполнения скрипта."""
+    # Загружаем все списки
+    female_names = load_names_from_file(PATH_TO_FEMALE_NAMES_FILE)
+    male_names = load_names_from_file(PATH_TO_MALE_NAMES_FILE)
+    surnames = load_names_from_file(PATH_TO_SURNAMES_FILE)
+
+    # Если хотя бы один из файлов не загрузился, прерываем выполнение
+    if not all([female_names, male_names, surnames]):
+        print("\nОдин или несколько файлов со списками не были загружены. Работа скрипта прервана.")
+        return
+
+    # Создаем объединенное множество имен для более простого поиска
+    all_first_names = female_names.union(male_names)
+    print(f"Всего уникальных имен (мужских и женских): {len(all_first_names)}")
+
+    # Запрашиваем путь к Excel файлу у пользователя
+    input_file_path = input("\nПожалуйста, введите полный путь к вашему Excel файлу: ")
+
+    excel_file = Path(input_file_path)
+    if not excel_file.is_file():
+        print(f"Ошибка: Файл не найден по пути '{input_file_path}'")
+        return
+
+    try:
+        print(f"Чтение файла '{excel_file.name}'...")
+        df = pd.read_excel(excel_file)
+
+        if 'Основной контакт' not in df.columns:
+            print("Ошибка: В таблице отсутствует столбец с названием 'Основной контакт'.")
+            return
+
+        df['Фамилия'] = None
+        df['Имя'] = None
+        df['Отчество'] = None
+
+        print("Начинаю обработку данных. Это может занять некоторое время...")
+
+        for index, row in df.iterrows():
+            contact_person = row['Основной контакт']
+
+            last, first, middle = parse_full_name(contact_person, all_first_names, surnames)
+
+            if any([last, first, middle]):
+                df.at[index, 'Фамилия'] = last
+                df.at[index, 'Имя'] = first
+                df.at[index, 'Отчество'] = middle
+
+        output_file_path = excel_file.parent / f"{excel_file.stem}_processed.xlsx"
+
+        print("Сохранение результатов...")
+        df.to_excel(output_file_path, index=False)
+
+        print("\nГотово!")
+        print(f"Обработанный файл сохранен по пути: {output_file_path}")
+
+    except Exception as e:
+        print(f"\nПроизошла непредвиденная ошибка: {e}")
+        print("Убедитесь, что файл не поврежден и у вас установлены все библиотеки (pandas, openpyxl).")
+
+
+if __name__ == '__main__':
+    main()
